@@ -1,6 +1,6 @@
-# 🧠 MindCraft — Rust Edition
+# 🧠 MindCraft (Aún no, hasta no terminarlo completamente)
 
-> **Editor y visualizador interactivo de mapas mentales basados en Markdown en tiempo real, con exportación nativa a `.xmind`.**
+> **Editor y visualizador interactivo de mapas mentales montado en RUST y basados en Markdown en tiempo real, con exportación nativa a `.xmind`.**
 
 ![Rust](https://img.shields.io/badge/Rust-2021_Edition-orange?style=for-the-badge&logo=rust)
 ![GUI](https://img.shields.io/badge/GUI-eframe_%2F_egui-blue?style=for-the-badge)
