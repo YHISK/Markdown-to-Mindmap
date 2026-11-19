@@ -367,6 +367,126 @@ fn xmind_topic_to_node(topic: &Value) -> TreeNode {
         node
 }
 
+fn latex_to_unicode(latex: &str) -> String {
+    let mut res = latex.to_string();
+
+    // 1. Extraer el contenido de \text{...} (ej. \text{ mg/dl} ->  mg/dl)
+    while let Some(start) = res.find("\\text{") {
+        let after_cmd = start + "\\text{".len();
+        if let Some(rel_end) = res[after_cmd..].find('}') {
+            let end = after_cmd + rel_end;
+            let inner = res[after_cmd..end].to_string();
+            res.replace_range(start..=end, &inner);
+        } else {
+            break;
+        }
+    }
+
+    // 2. Reemplazos de comandos y símbolos frecuentes
+    let replacements = [
+        ("\\%", "%"),
+        ("\\sim", "~"),
+        ("\\alpha", "α"), ("\\beta", "β"), ("\\gamma", "γ"), ("\\delta", "δ"),
+        ("\\epsilon", "ε"), ("\\theta", "θ"), ("\\lambda", "λ"), ("\\mu", "μ"),
+        ("\\pi", "π"), ("\\sigma", "σ"), ("\\omega", "ω"), ("\\infty", "∞"),
+        ("\\sum", "∑"), ("\\int", "∫"), ("\\approx", "≈"), ("\\neq", "≠"),
+        ("\\leq", "≤"), ("\\geq", "≥"), ("\\pm", "±"), ("\\times", "×"),
+        ("\\rightarrow", "→"), ("\\leftarrow", "←"), ("\\Rightarrow", "⇒"),
+        ("^0", "⁰"), ("^1", "¹"), ("^2", "²"), ("^3", "³"), ("^4", "⁴"),
+        ("^5", "⁵"), ("^6", "⁶"), ("^7", "⁷"), ("^8", "⁸"), ("^9", "⁹"),
+        ("^n", "ⁿ"), ("^i", "ⁱ"),
+        ("_0", "₀"), ("_1", "₁"), ("_2", "₂"), ("_3", "₃"), ("_4", "₄"),
+        ("_5", "₅"), ("_6", "₆"), ("_7", "₇"), ("_8", "₈"), ("_9", "₉"),
+        ("_n", "ₙ"), ("_i", "ᵢ"),
+    ];
+    for (from, to) in replacements {
+        res = res.replace(from, to);
+    }
+    res
+}
+
+// Parser en línea: detecta Math ($...$) y Markdown (** y *) sin cortar palabras
+fn build_inline_layout_job(
+    ui: &egui::Ui,
+    raw_text: &str,
+    font_size: f32,
+    text_color: Color32,
+    max_text_width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = max_text_width.max(40.0);
+
+    // ¡ESTA ES LA LÍNEA QUE ARREGLA EL CORTE DE PALABRAS!
+    job.wrap.break_anywhere = false;
+
+    // 1. Pre-procesar LaTeX ($...$)
+    let mut processed_text = String::new();
+    let mut in_math = false;
+    for part in raw_text.split('$') {
+        if in_math {
+            processed_text.push_str(&latex_to_unicode(part));
+        } else {
+            processed_text.push_str(part);
+        }
+        in_math = !in_math;
+    }
+
+    // 2. Procesar Negritas y Cursivas
+    let chars: Vec<char> = processed_text.chars().collect();
+    let mut i = 0;
+    let mut bold = false;
+    let mut italic = false;
+    let mut buf = String::new();
+
+    let push_segment = |buf: &mut String, bold: bool, italic: bool, job: &mut egui::text::LayoutJob| {
+        if buf.is_empty() { return; }
+
+        let mut fmt = egui::TextFormat::simple(FontId::proportional(font_size), text_color);
+        fmt.italics = italic;
+
+        if bold {
+            // Hacemos la letra ligeramente más grande y con más espaciado para simular negrita
+            fmt.font_id.size = font_size * 1.05;
+            fmt.extra_letter_spacing = 1.2;
+            fmt.line_height = Some(font_size * 1.2);
+        }
+
+        job.append(buf, 0.0, fmt);
+        buf.clear();
+    };
+
+    while i < chars.len() {
+        // Detectar ** o __ para negrita
+        if (chars[i] == '*' && chars.get(i + 1) == Some(&'*'))
+            || (chars[i] == '_' && chars.get(i + 1) == Some(&'_'))
+            {
+                push_segment(&mut buf, bold, italic, &mut job);
+                bold = !bold;
+                i += 2;
+                continue;
+            }
+
+            // Detectar * o _ para cursiva
+            if chars[i] == '*' || chars[i] == '_' {
+                push_segment(&mut buf, bold, italic, &mut job);
+                italic = !italic;
+                i += 1;
+                continue;
+            }
+
+            buf.push(chars[i]);
+            i += 1;
+    }
+
+    push_segment(&mut buf, bold, italic, &mut job);
+
+    if job.sections.is_empty() {
+        job.append("", 0.0, egui::TextFormat::simple(FontId::proportional(font_size), text_color));
+    }
+
+    ui.fonts(|f| f.layout_job(job))
+}
+
 // ==========================================
 // 2. Exportador a .xmind
 // ==========================================
@@ -571,19 +691,21 @@ impl MindMapRenderer {
             2 => 13.0,
             _ => 12.0,
         };
-        let font_id = FontId::proportional(base_size);
-        let clean_title = strip_md(&node.title);
+        let has_children = !node.children.is_empty();
+        let toggle_extra: f32 = if has_children { 22.0 } else { 0.0 };
+        let pad_x: f32 = if depth == 0 { 32.0 } else { 24.0 };
+        let pad_y: f32 = if depth == 0 { 20.0 } else { 14.0 };
 
-        let wrap_w = if depth == 0 { 300.0 } else { 240.0 };
-        let galley = ui.fonts(|f| f.layout(clean_title, font_id, Color32::BLACK, wrap_w));
-        let toggle_extra = if !node.children.is_empty() { 20.0 } else { 0.0 };
+        let max_box_w: f32 = if depth == 0 { 320.0 } else { 250.0 };
+        let wrap_w: f32 = (max_box_w - pad_x - toggle_extra).max(60.0);
 
-        let pad_x = if depth == 0 { 36.0 } else { 26.0 };
-        let pad_y = if depth == 0 { 22.0 } else { 16.0 };
+        let galley = build_inline_layout_job(ui, &node.title, base_size, Color32::BLACK, wrap_w);
+        let text_w = galley.size().x.min(wrap_w);
+        let text_h = galley.size().y.max(base_size * 1.2);
 
         node.size = Vec2::new(
-            galley.size().x + pad_x + toggle_extra,
-                              (galley.size().y + pad_y).max(28.0),
+            (text_w + pad_x + toggle_extra).clamp(70.0, max_box_w),
+                              (text_h + pad_y).max(30.0),
         );
 
         for child in &mut node.children {
@@ -612,8 +734,8 @@ impl MindMapRenderer {
     }
 
     fn layout_idea_map(&self, node: &mut TreeNode) {
-        let v_gap = 22.0;
-        let h_gap = 75.0;
+        let v_gap = 35.0; // <-- Aumentado de 22.0 a 35.0 para más espacio vertical
+        let h_gap = 100.0; // <-- Aumentado de 75.0 a 100.0 para más espacio horizontal
 
         let mid = (node.children.len() + 1) / 2;
         let (right_kids, left_kids) = node.children.split_at_mut(mid);
@@ -675,8 +797,8 @@ impl MindMapRenderer {
             return;
         }
 
-        let gap_main = 65.0;
-        let gap_cross = 24.0;
+        let gap_main = 100.0; // <-- Aumentado de 65.0 a 100.0
+        let gap_cross = 32.0; // <-- Aumentado de 24.0 a 32.0
 
         let spans: Vec<f32> = parent
         .children
@@ -1013,16 +1135,17 @@ impl MindMapRenderer {
             }
             EdgeStyle::Orthogonal => {
                 if horizontal {
-                    let mid_x = (start.x + end.x) * 0.5;
-                    let p1 = Pos2::new(mid_x, start.y);
-                    let p2 = Pos2::new(mid_x, end.y);
+                    // Usamos un offset del 30% en lugar del 50% (punto medio) para que las curvas se vean más naturales
+                    let offset_x = (end.x - start.x) * 0.3;
+                    let p1 = Pos2::new(start.x + offset_x, start.y);
+                    let p2 = Pos2::new(end.x - offset_x, end.y);
                     painter.line_segment([start, p1], stroke);
                     painter.line_segment([p1, p2], stroke);
                     painter.line_segment([p2, end], stroke);
                 } else {
-                    let mid_y = (start.y + end.y) * 0.5;
-                    let p1 = Pos2::new(start.x, mid_y);
-                    let p2 = Pos2::new(end.x, mid_y);
+                    let offset_y = (end.y - start.y) * 0.3;
+                    let p1 = Pos2::new(start.x, start.y + offset_y);
+                    let p2 = Pos2::new(end.x, end.y - offset_y);
                     painter.line_segment([start, p1], stroke);
                     painter.line_segment([p1, p2], stroke);
                     painter.line_segment([p2, end], stroke);
@@ -1057,6 +1180,7 @@ impl MindMapRenderer {
     fn draw_nodes(
         &self,
         painter: &egui::Painter,
+        ui: &egui::Ui,
         node: &mut TreeNode,
         offset: Vec2,
         depth: usize,
@@ -1135,7 +1259,7 @@ impl MindMapRenderer {
         let has_children = !node.children.is_empty();
         let btn_size = 15.0 * self.zoom;
 
-        let text_center = if has_children {
+        if has_children {
             node.toggle_rect = Rect::from_center_size(
                 Pos2::new(rect.right() - 12.0 * self.zoom, rect.center().y),
                                                       Vec2::splat(btn_size),
@@ -1159,11 +1283,9 @@ impl MindMapRenderer {
                          FontId::proportional(11.0 * self.zoom),
                          Color32::from_rgb(31, 41, 55),
             );
-            Pos2::new(rect.center().x - 8.0 * self.zoom, rect.center().y)
         } else {
             node.toggle_rect = Rect::NOTHING;
-            center
-        };
+        }
 
         let base_size = match depth {
             0 => 19.0,
@@ -1171,15 +1293,28 @@ impl MindMapRenderer {
             2 => 13.0,
             _ => 12.0,
         };
-        let clean_title = strip_md(&node.title);
 
-        painter.text(
-            text_center,
-            Align2::CENTER_CENTER,
-            clean_title,
-            FontId::proportional(base_size * self.zoom),
-                     final_text,
+        let base_pad_x: f32 = if depth == 0 { 32.0 } else { 24.0 };
+        let base_toggle_reserve: f32 = if has_children { 24.0 } else { 0.0 };
+        let base_max_box_w: f32 = if depth == 0 { 320.0 } else { 250.0 };
+        let base_wrap_w: f32 = (base_max_box_w - base_pad_x - base_toggle_reserve).max(70.0);
+
+        let galley = build_inline_layout_job(
+            ui,
+            &node.title,
+            base_size * self.zoom,
+            final_text,
+            base_wrap_w * self.zoom,
         );
+
+        // Tu nueva fórmula para centrar el texto usando las variables correctas
+        let avail_w = rect.width() - (base_pad_x * self.zoom) - (base_toggle_reserve * self.zoom);
+        let text_origin = Pos2::new(
+            rect.left() + (base_pad_x * 0.5 * self.zoom) + ((avail_w - galley.size().x).max(0.0) * 0.5),
+                                    rect.center().y - galley.size().y * 0.5,
+        );
+
+        painter.galley(text_origin, galley, final_text);
 
         if has_children && !node.collapsed {
             for (idx, child) in node.children.iter_mut().enumerate() {
@@ -1187,6 +1322,7 @@ impl MindMapRenderer {
                 current_path.push(idx);
                 self.draw_nodes(
                     painter,
+                    ui,
                     child,
                     offset,
                     depth + 1,
@@ -1882,7 +2018,7 @@ impl MindMapApp {
 
         ui.add_space(4.0);
 
-        // Sección: Estructura (Global por ahora, como en Xmind)
+        // Sección: Estructura
         ui.label(egui::RichText::new("▼ Estructura").size(12.5).strong().color(Color32::from_rgb(180, 180, 180)));
         ui.add_space(6.0);
         egui::ComboBox::from_id_source("style_chart_type")
@@ -1898,7 +2034,10 @@ impl MindMapApp {
         ui.separator();
         ui.add_space(12.0);
 
-        // Sección: Forma y Texto (Requiere nodo seleccionado)
+        // Sección: Forma y Texto
+        // 1. Creamos una bandera para saber si hubo cambios sin leer el árbol
+        let mut changed = false;
+
         ui.add_enabled_ui(has_selection, |ui| {
             ui.label(egui::RichText::new("▼ Forma y Texto").size(12.5).strong().color(Color32::from_rgb(180, 180, 180)));
             ui.add_space(8.0);
@@ -1910,6 +2049,7 @@ impl MindMapApp {
                     let mut color = node.custom_fill.unwrap_or(Color32::from_rgb(60, 60, 60));
                     if ui.color_edit_button_srgba(&mut color).changed() {
                         node.custom_fill = Some(color);
+                        changed = true; // Marcamos que hubo cambio
                     }
                 });
 
@@ -1918,24 +2058,46 @@ impl MindMapApp {
                 // Texto
                 ui.horizontal(|ui| {
                     ui.label("Tamaño:");
-                    // Placeholder visual para tamaño
                     ui.add(egui::DragValue::new(&mut 14.0).speed(1.0));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Estilo:");
-                    ui.selectable_label(false, egui::RichText::new("B").strong());
-                    ui.selectable_label(false, egui::RichText::new("I").italics());
-                    ui.selectable_label(false, egui::RichText::new("S").strikethrough());
-                    ui.selectable_label(false, egui::RichText::new("U").underline());
+                    let is_bold = node.title.starts_with("**") && node.title.ends_with("**");
+                    let is_italic = node.title.starts_with("*") && node.title.ends_with("*") && !is_bold;
+
+                    if ui.selectable_label(is_bold, egui::RichText::new("B").strong()).clicked() {
+                        if is_bold {
+                            node.title = node.title[2..node.title.len()-2].to_string();
+                        } else {
+                            node.title = format!("**{}**", node.title);
+                        }
+                        changed = true;
+                    }
+                    if ui.selectable_label(is_italic, egui::RichText::new("I").italics()).clicked() {
+                        if is_italic {
+                            node.title = node.title[1..node.title.len()-1].to_string();
+                        } else {
+                            node.title = format!("*{}*", node.title);
+                        }
+                        changed = true;
+                    }
+                    let _ = ui.selectable_label(false, egui::RichText::new("S").strikethrough());
+                    let _ = ui.selectable_label(false, egui::RichText::new("U").underline());
                 });
 
                 ui.add_space(12.0);
                 if ui.button("Restablecer estilo").clicked() {
                     node.custom_fill = None;
                     node.dir_override = NodeDirectionOverride::Auto;
+                    changed = true;
                 }
             }
         });
+
+        // 2. Actualizamos el Markdown aquí, cuando el 'node' ya liberó el árbol
+        if changed {
+            self.md_text = tree_to_markdown(&self.root_tree);
+        }
 
         ui.add_space(16.0);
         ui.separator();
@@ -2517,8 +2679,14 @@ impl MindMapApp {
 
             let mut draw_path = Vec::new();
             self.renderer.draw_nodes(
-                &painter, &mut self.root_tree, offset, 0, 0,
-                &self.selected_path, &mut draw_path,
+                &painter,
+                ui,
+                &mut self.root_tree,
+                offset,
+                0,
+                0,
+                &self.selected_path,
+                &mut draw_path,
             );
 
             // Los resúmenes se dibujan ENCIMA (bracket visible)
@@ -2539,7 +2707,7 @@ impl MindMapApp {
                     } else {
                         Color32::from_rgb(245, 158, 11)
                     };
-                    painter.rect_stroke(r.expand(4.0), 6.0, Stroke::new(2.5, col));
+                    painter.rect_stroke(r.expand(4.0), 6.0, Stroke::new(2.5_f32, col));
                 }
             }
         });
@@ -2650,7 +2818,7 @@ fn draw_relations(
         let end = rect_edge_toward(rb, ra.center());
 
         let stroke = Stroke::new(
-            if selected == Some(i) { 3.0 } else { 2.0 },
+            if selected == Some(i) { 3.0 } else { 2.0_f32 },
                 if selected == Some(i) { Color32::from_rgb(2, 132, 199) } else { color },
         );
         draw_dashed(painter, start, end, stroke, 8.0, 5.0);
@@ -2664,7 +2832,7 @@ fn draw_relations(
         );
         let label_rect = Rect::from_center_size(mid - Vec2::new(0.0, 14.0), galley.size() + Vec2::splat(8.0));
         painter.rect_filled(label_rect, 4.0, Color32::WHITE);
-        painter.rect_stroke(label_rect, 4.0, Stroke::new(1.0, color));
+        painter.rect_stroke(label_rect, 4.0, Stroke::new(1.0_f32, color));
         painter.galley(label_rect.left_top() + Vec2::splat(4.0), galley, Color32::from_rgb(2, 132, 199));
     }
 }
@@ -2675,7 +2843,7 @@ fn draw_summaries(
     rects: &HashMap<Vec<usize>, Rect>,
     zoom: f32,
 ) {
-    let stroke = Stroke::new(1.5, Color32::from_rgb(107, 114, 128));
+    let stroke = Stroke::new(1.5_f32, Color32::from_rgb(107, 114, 128));
     for s in summaries {
         let mut bmin = Pos2::new(f32::MAX, f32::MAX);
         let mut bmax = Pos2::new(f32::MIN, f32::MIN);
