@@ -1,0 +1,6 @@
+cd "/home/jsisch/Documentos/Proyecto MindCraft"
+cat << 'EOF' > .gitignore
+/target
+**/*.rs.bk
+.DS_Store
+EOF

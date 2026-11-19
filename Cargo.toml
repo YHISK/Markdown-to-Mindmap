@@ -1,0 +1,13 @@
+[package]
+name = "mindcraft"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.27"
+egui = "0.27"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zip = "0.6"
+uuid = { version = "1.6", features = ["v4"] }
+rfd = "0.14"
